@@ -1,0 +1,485 @@
+---
+title: "Voter Turnout Analysis"
+author: "Christian Lopez"
+date: "2025-10-12"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+This project analyzes county-level socioeconomic variables to understand and predict voter turnout using statistical and machine learning models.
+
+```{r}
+df <- read.csv("Data/socioeconomic_voting.csv")
+```
+
+```{r}
+library(ggplot2)
+library(caret)
+library(car)
+library(betareg)
+library(glmulti)
+library(randomForest)
+library(Metrics)
+library(MASS)
+library(dplyr)
+
+# Inspect dataset dimensions and variable summaries
+dim(df) # 3115 obs, 10 var
+summary(df)
+
+# No variables appear to create obvious target leakage.
+
+# Create Census region variable from state names
+df1 <- df %>% 
+  mutate(Region = case_when(
+    State %in% c("CONNECTICUT", "MAINE", "MASSACHUSETTS", "NEW HAMPSHIRE", "RHODE ISLAND",
+                 "VERMONT", "NEW JERSEY", "NEW YORK", "PENNSYLVANIA") ~ "Northeast",
+    
+    State %in% c("ILLINOIS", "INDIANA", "MICHIGAN", "OHIO", "WISCONSIN", "IOWA",
+                 "KANSAS", "MINNESOTA", "MISSOURI", "NEBRASKA", "NORTH DAKOTA",
+                 "SOUTH DAKOTA") ~ "Midwest",
+    
+    State %in% c("DELAWARE", "DISTRICT OF COLUMBIA", "FLORIDA", "GEORGIA", "MARYLAND", "NORTH CAROLINA",
+                 "SOUTH CAROLINA", "VIRGINIA", "WEST VIRGINIA", "ALABAMA", "KENTUCKY",
+                 "MISSISSIPPI", "TENNESSEE", "ARKANSAS", "LOUISIANA", "OKLAHOMA", "TEXAS") ~ "South",
+    
+    State %in% c("ARIZONA", "COLORADO", "IDAHO", "MONTANA", "NEVADA", "NEW MEXICO", "UTAH",
+                 "WYOMING", "ALASKA", "CALIFORNIA", "HAWAII", "OREGON", "WASHINGTON") ~ "West",
+    TRUE ~ NA_character_
+  ))
+
+# Check for states that were not assigned a region
+sum(is.na(df1$Region))
+df1[is.na(df1$Region), ]
+
+# Remove identifying geographic variables not used for modeling
+df1 <- df1 %>%
+  dplyr::select(-any_of(c("State", "County.Name", "FIPS")))
+
+head(df1) 
+```
+
+# EDA
+
+This section performs exploratory data analysis (EDA), including descriptive statistics, outlier detection, and visualization to understand variable distributions and relationships.
+
+[Link 1](https://censusreporter.org/profiles/05000US48301-loving-county-tx/) [Link 2](https://hdpulse.nimhd.nih.gov/data-portal/social/table?age=081&age_options=age25_1&demo=00006&demo_options=education_3&race=00&race_options=race_7&sex=0&sex_options=sexboth_1&socialtopic=020&socialtopic_options=social_6&statefips=48&statefips_options=area_states)
+
+```{r}
+# An extreme outlier is observed where bachelor's degree percentage equals 0.
+# This corresponds to Loving County, Texas, which has an extremely small population.
+# Due to the instability of estimates in very low-population counties, this observation
+# is removed to improve model reliability.
+dim(df1) # 3115 obs, 8 var
+summary(df1) 
+
+
+df1[df1$Bachelor.s.Degree.or.Higher.Percentage..2018.2022. == 0, ] # obs 2647
+df[2647, ] # Loving, Texas
+
+df1 <- df1 %>%
+  filter(Bachelor.s.Degree.or.Higher.Percentage..2018.2022. != 0)
+
+dim(df1) # 3114 observations now
+df1[df1$Bachelor.s.Degree.or.Higher.Percentage..2018.2022. == 0, ] # is removed
+
+# Correlation
+numerical_df <- df1[ ,c("Unemployment.Rate.2020", "County.Median.Household.Income..2021.",
+                  "County.Income.Percentile.Within.State..2021.",
+                  "Bachelor.s.Degree.or.Higher.Percentage..2018.2022.", "Vote.Percentage")]
+cor(numerical_df)
+# Strong positive correlations observed between:
+# - Median income and income percentile (0.749)
+# - Median income and bachelor's degree percentage (0.725)
+
+# Visuals between predictors and response
+numerical_cols <- c(
+  "Unemployment.Rate.2020",
+  "County.Median.Household.Income..2021.",
+  "County.Income.Percentile.Within.State..2021.",
+  "Bachelor.s.Degree.or.Higher.Percentage..2018.2022.",
+  "Vote.Percentage"
+)
+
+# Histogram of variables (will try transformations during model building)
+lapply(numerical_cols, function(col) {
+  hist(df1[[col]],
+       main = paste("Histogram of", col),
+       xlab = col,
+       col = "lightblue",
+       border = "darkblue")
+})
+# Observed distributions:
+# - Vote percentage: left-skewed
+# - Unemployment rate: right-skewed
+# - Median income: right-skewed
+# - Bachelor's degree percentage: right-skewed
+# - Income percentile: approximately symmetric
+
+plot(density(df1$County.Income.Percentile.Within.State..2021.),
+     main = "Density of Income Percentile",
+     xlab = "Income Percentile",
+     col = "blue", lwd = 2)
+# income percentile looks normal
+
+# Identified extreme values in unemployment and income variables.
+# Verified that these correspond to valid observations with large populations,
+# so they are retained in the dataset.
+for (col_name in numerical_cols) {
+  boxplot(df1[[col_name]],
+          main = paste("Boxplot of", col_name),
+          ylab = col_name,
+          col = "lightblue",
+          border = "darkblue")
+}
+
+for (col_name in numerical_cols) {
+  x <- df1[[col_name]]
+  
+  Q1 <- quantile(x, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x, 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  
+  lower_bound <- Q1 - 1.5 * IQR
+  upper_bound <- Q3 + 1.5 * IQR
+  
+  outliers <- df1[x < lower_bound | x > upper_bound, ]
+  
+  print(outliers[, col_name, drop = FALSE])
+}
+
+df[173, ] # imperial, california
+df[201, ] # san mateo, california
+
+# Shows amount in each group to make sure that none are too small (less than 5%)
+categorical_cols <- c("Party", "Region", "Urban.Influence.Code.2013") 
+
+for (col_name in categorical_cols) {
+  print(table(df1[[col_name]]))
+}
+# Urban influence categories are consolidated to ensure sufficient sample size
+# within each group for modeling.
+
+# group 1 will now have 1-3 in it, group 2 will have 4-6, ... , group 4 has 10-12
+df1 <- df1 %>%
+  mutate(UIC_Group = case_when(
+    Urban.Influence.Code.2013 %in% 1:3 ~ "1",
+    Urban.Influence.Code.2013 %in% 4:6 ~ "2",
+    Urban.Influence.Code.2013 %in% 7:9 ~ "3",
+    Urban.Influence.Code.2013 %in% 10:12 ~ "4"
+  ))
+
+# Check
+table(df1$UIC_Group)
+# Groups are now big enough
+# Remove original UIC column
+df1 <- dplyr::select(df1, -Urban.Influence.Code.2013)
+```
+
+## Factoring and encoding
+
+```{r}
+# Factorization
+categorical_cols <- c("Party", "Region", "UIC_Group")
+str(df1[categorical_cols])
+
+for (col_name in categorical_cols) {
+  df1[[col_name]] <- as.factor(df1[[col_name]])
+}
+
+# Confirm categorical variables are factors
+str(df1[categorical_cols])
+
+# Data splitting
+set.seed(123)
+partition <- createDataPartition(df1$Vote.Percentage, p = 0.7, list = FALSE)
+
+train_raw <- df1[partition, ]
+test_raw  <- df1[-partition, ]
+
+# Check split balance
+dim(train_raw)
+dim(test_raw)
+
+mean(train_raw$Vote.Percentage)
+mean(test_raw$Vote.Percentage)
+
+range(train_raw$Vote.Percentage)
+range(test_raw$Vote.Percentage)
+
+# Check predictor-response relationships 
+temp_model <- lm(Vote.Percentage ~ ., data = train_raw)
+crPlots(temp_model)
+# Component + residual plots indicate approximate linearity between predictors and response.
+# No strong nonlinear patterns were observed, so no transformations were applied.
+
+# Recheck influential observations using training data only
+plot(temp_model)
+
+# Inspect observations with the largest influence values 
+cooks_d <- cooks.distance(temp_model)
+top_influential <- order(cooks_d, decreasing = TRUE)[1:3]
+
+train_raw[top_influential, ]
+
+# These observations are retained if they have valid values and reasonable populations.
+
+# Encode categorical variables 
+dummy_model <- dummyVars(~ ., data = train_raw[categorical_cols], fullRank = TRUE)
+
+train_dummy <- as.data.frame(predict(dummy_model, newdata = train_raw))
+test_dummy  <- as.data.frame(predict(dummy_model, newdata = test_raw))
+
+head(train_dummy)
+
+# Combine numeric variables and encoded categorical variables
+numerical_cols <- c(
+  "Unemployment.Rate.2020",
+  "County.Median.Household.Income..2021.",
+  "County.Income.Percentile.Within.State..2021.",
+  "Bachelor.s.Degree.or.Higher.Percentage..2018.2022.",
+  "Vote.Percentage"
+)
+
+train_df <- cbind(train_raw[numerical_cols], train_dummy)
+test_df  <- cbind(test_raw[numerical_cols], test_dummy)
+
+dim(train_df) # 2,182 observations
+dim(test_df) # 932 observations
+
+```
+
+# Model Building
+
+## Regression
+
+```{r}
+# Response is voting percentage (continuous, bounded between 0 and 100).
+# A linear model provides interpretability, but predictions may fall outside bounds.
+# A beta regression model is more appropriate after scaling the response to (0,1).
+
+# Linear Regression
+linear_model <- lm(Vote.Percentage ~ ., data = train_df)
+summary(linear_model) # R^2 ≈ 0.186
+
+# Beta Regression
+
+# Scale response variable using TRAIN and TEST 
+train_df_beta <- train_df %>%
+  mutate(Vote_scaled = Vote.Percentage / 100) %>%
+  dplyr::select(-Vote.Percentage)
+
+test_df_beta <- test_df %>%
+  mutate(Vote_scaled = Vote.Percentage / 100) %>%
+  dplyr::select(-Vote.Percentage)
+
+# Check for boundary issues (beta requires values strictly between 0 and 1)
+sum(train_df_beta$Vote_scaled == 0)
+sum(train_df_beta$Vote_scaled == 1)
+# No exact 0s or 1s detected
+
+# Fit full beta regression model
+beta_model <- betareg(Vote_scaled ~ ., data = train_df_beta)
+summary(beta_model) # R^2 ≈ 0.189
+
+# AIC values are not directly compared between the linear regression and beta regression models.
+# Linear regression is used as a baseline model.
+# Beta regression is selected as the main model because voter turnout is continuous
+# and bounded, making a proportion-based model more appropriate after scaling.
+
+# Model Diagnostic
+
+# Model diagnostics show residuals mostly centered around zero.
+# Some clustering and influential observations are present, but no severe pattern
+# suggests that the beta regression model is unusable.
+# Residual plots do not show strong evidence that transformations are necessary.
+
+plot(beta_model)
+# Diagnostics indicate:
+# - Residuals are approximately centered
+# - No strong curvature or funneling
+# - Some high-leverage points, but no critical issues
+
+# Check residual relationships with predictors
+resid_q <- residuals(beta_model, type = "quantile")
+
+plot(train_df_beta$Unemployment.Rate.2020, resid_q,
+     xlab = "Unemployment Rate (2020)",
+     ylab = "Quantile Residuals")
+
+plot(train_df_beta$County.Median.Household.Income..2021., resid_q,
+     xlab = "Median Household Income (2021)",
+     ylab = "Quantile Residuals")
+
+plot(train_df_beta$County.Income.Percentile.Within.State..2021., resid_q,
+     xlab = "Income Percentile",
+     ylab = "Quantile Residuals")
+
+plot(train_df_beta$Bachelor.s.Degree.or.Higher.Percentage..2018.2022., resid_q,
+     xlab = "Bachelor's Degree (%)",
+     ylab = "Quantile Residuals")
+
+# Categorical checks (already encoded)
+# No strong pattern differences observed
+
+# No transformations are required.
+
+# Model Selection
+
+# Selected model based on AIC comparison
+beta_model_select <- betareg(
+  Vote_scaled ~ 
+    Unemployment.Rate.2020 +
+    County.Median.Household.Income..2021. +
+    County.Income.Percentile.Within.State..2021. +
+    Bachelor.s.Degree.or.Higher.Percentage..2018.2022. +
+    Party.REPUBLICAN + Region.South +
+    UIC_Group.2 + UIC_Group.3 + UIC_Group.4,
+  data = train_df_beta
+)
+
+# Compare full and reduced beta models
+AIC(beta_model)
+AIC(beta_model_select)
+
+summary(beta_model_select)
+
+# The full beta model has a slightly lower AIC than the reduced model.
+# However, the AIC difference is small, and the reduced model has fewer predictors.
+# The reduced model is selected for simplicity and interpretability while maintaining
+# similar model fit.
+
+# Multicollinearity Check
+
+vif_model <- lm(
+  Vote_scaled ~ 
+    Unemployment.Rate.2020 +
+    County.Median.Household.Income..2021. +
+    County.Income.Percentile.Within.State..2021. +
+    Bachelor.s.Degree.or.Higher.Percentage..2018.2022. +
+    Party.REPUBLICAN + Region.South +
+    UIC_Group.2 + UIC_Group.3 + UIC_Group.4,
+  data = train_df_beta
+)
+
+vif(vif_model)
+
+# All VIF values are below 5, indicating no serious multicollinearity issues.
+
+# Final model
+final_model <- beta_model_select
+```
+
+## Random Forest
+
+Random forest is included as a flexible tree-based model. It may capture nonlinear patterns and interactions better than regression models, but it is less directly interpretable.
+
+```{r}
+set.seed(123)
+
+rf_model <- randomForest(
+  Vote.Percentage ~ .,
+  data = train_df,
+  ntree = 1000,
+  mtry = floor(sqrt(ncol(train_df) - 1)),
+  importance = TRUE
+)
+
+rf_model
+```
+
+# Model Evaluation
+
+## Regression Evaluation
+
+```{r}
+# Beta regression predictions on test data
+beta_preds <- predict(final_model, newdata = test_df_beta, type = "response")
+
+# Test errors
+rmse_beta <- rmse(test_df_beta$Vote_scaled, beta_preds)
+mae_beta  <- mae(test_df_beta$Vote_scaled, beta_preds)
+
+rmse_beta
+mae_beta
+
+# RMSE = 0.139 and MAE = 0.112 on the scaled response.
+# This means predictions are off by about 11.2 percentage points on average.
+
+# Test R-squared
+y_actual <- test_df_beta$Vote_scaled
+
+rss <- sum((y_actual - beta_preds)^2)
+tss <- sum((y_actual - mean(y_actual))^2)
+
+test_r2 <- 1 - rss / tss
+test_r2
+
+# Test R-squared is about 0.190, meaning the model explains about 19% of the
+# variation in test-set turnout using the included predictors.
+
+# Predicted vs actual
+plot(y_actual, beta_preds,
+     xlab = "Actual Turnout (scaled)",
+     ylab = "Predicted Turnout (scaled)",
+     main = "Beta Regression: Predicted vs Actual")
+
+abline(0, 1, col = "red")
+
+# Final model summary
+summary(final_model)
+
+# Coefficients are interpreted on the logit scale because beta regression uses
+# a logit link for the mean model.
+# Example:
+# Region.South has a negative coefficient, meaning counties in the South are
+# associated with lower expected turnout compared to the reference region,
+# holding other variables constant.
+```
+
+## Random Forest Evaluation
+
+```{r}
+rf_preds <- predict(rf_model, newdata = test_df)
+
+rf_rmse <- RMSE(rf_preds, test_df$Vote.Percentage)
+rf_mae  <- MAE(rf_preds, test_df$Vote.Percentage)
+
+rf_rmse
+rf_mae
+
+# RMSE is approximately 12.81 percentage points.
+# MAE is approximately 9.99 percentage points.
+# These errors are lower than the beta regression errors after converting
+# beta regression errors back to percentage-point scale.
+
+# Random Forest test R-squared
+y_actual_rf <- test_df$Vote.Percentage
+
+rss_rf <- sum((y_actual_rf - rf_preds)^2)
+tss_rf <- sum((y_actual_rf - mean(y_actual_rf))^2)
+
+rf_r2_test <- 1 - rss_rf / tss_rf
+rf_r2_test
+
+# Test R-squared is approximately 0.308, meaning the random forest explains
+# about 30.8% of variation in test-set turnout.
+
+# Variable importance
+varImpPlot(rf_model)
+importance(rf_model)
+
+# Based on %IncMSE, the most important predictors are:
+# bachelor's degree percentage, Republican vote indicator, unemployment rate,
+# South region indicator, and median household income.
+
+# Overall, the random forest had stronger predictive performance than beta regression,
+# with lower RMSE/MAE and higher test R-squared.
+# The beta regression model remains useful for interpretation, while the random forest
+# is better for prediction.
+```
