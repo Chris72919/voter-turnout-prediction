@@ -1,6 +1,10 @@
 # Voter Turnout Prediction
 
-This project analyzes U.S. county-level voter turnout using socioeconomic and regional variables. Multiple statistical and machine learning models were developed to evaluate predictive performance and identify key turnout predictors.
+This project analyzes U.S. county-level voter turnout using socioeconomic, political, and regional variables to evaluate factors associated with turnout and compare predictive modeling approaches. Beta regression and random forest models were developed and evaluated using train/test performance results. 
+
+## Dataset
+County-level socioeconomic and voting data sourced from Kaggle:
+https://www.kaggle.com/datasets/adamcuculich/county-socioeconomic-education-and-voting-data
 
 ## Methods
 - Beta Regression
