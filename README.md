@@ -36,10 +36,12 @@ https://www.kaggle.com/datasets/adamcuculich/county-socioeconomic-education-and-
 ## Visuals
 ### Beta Regression: Predicted vs Actual
 Predicted versus actual turnout values for the beta regression model on the test dataset. Points closer to the red reference line indicate more accurate predictions.
+
 <img width="711" height="516" alt="image" src="https://github.com/user-attachments/assets/0024c16e-9374-4af3-8947-3cda88d59a05" />
 
 ### Random Forest Variable Importance
 The random forest model identified education level, political affiliation, unemployment rate, and regional indicators as important turnout predictors.
+
 <img width="1270" height="887" alt="image" src="https://github.com/user-attachments/assets/915dd660-f027-4452-b2fd-047fc0d78ab6" />
 
 ## Future Improvements
